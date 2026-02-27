@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Michigan Frost Law Monitor — NAJ Trucking</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0A0A0A; font-family: "Arial Narrow", Arial, sans-serif; }
+    ::-webkit-scrollbar { width: 6px; } 
+    ::-webkit-scrollbar-track { background: #141414; }
+    ::-webkit-scrollbar-thumb { background: #C9A84C; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+
+    // Storage polyfill using localStorage (replaces Claude artifact storage API)
+    window.storage = {
+      get: async (key, shared) => {
+        try {
+          const val = localStorage.getItem((shared ? "shared_" : "user_") + key);
+          if (val === null) throw new Error("Key not found");
+          return { key, value: val, shared: !!shared };
+        } catch(e) { throw e; }
+      },
+      set: async (key, value, shared) => {
+        try {
+          localStorage.setItem((shared ? "shared_" : "user_") + key, value);
+          return { key, value, shared: !!shared };
+        } catch(e) { return null; }
+      },
+      delete: async (key, shared) => {
+        localStorage.removeItem((shared ? "shared_" : "user_") + key);
+        return { key, deleted: true, shared: !!shared };
+      },
+      list: async (prefix, shared) => {
+        const p = (shared ? "shared_" : "user_") + (prefix || "");
+        const keys = Object.keys(localStorage).filter(k => k.startsWith(p)).map(k => k.replace(/^(shared_|user_)/, ""));
+        return { keys, prefix, shared: !!shared };
+      }
+    };
+
+    const { useState, useEffect, useRef } = React;
+
+
+const C = {
+  bg: "#0A0A0A", surface: "#141414", surfaceAlt: "#1C1C1C",
+  border: "#2A2A2A", gold: "#C9A84C", goldBright: "#F0C040",
+  goldDim: "#C9A84C22", white: "#FFFFFF", gray: "#888888",
+  grayDark: "#444444", green: "#2E7D32", orange: "#E65100", blue: "#1565C0",
+};
+
+const SOURCES = [
+  { name: "MDOT Frost Laws", url: "https://www.michigan.gov/mdot/travel/trucks-movers/frost-laws", icon: "🏛" },
+  { name: "Michigan Trucking Assoc.", url: "https://www.mitrucking.org", icon: "🚛" },
+  { name: "MDOT OS/OW Permits", url: "https://www.michigan.gov/mdot/travel/trucks-movers/oversize-overweight-permits", icon: "📋" },
+];
+
+const ALL_COUNTIES = [
+  "Alcona","Alger","Allegan","Alpena","Antrim","Arenac","Baraga","Barry","Bay","Benzie",
+  "Berrien","Branch","Calhoun","Cass","Charlevoix","Cheboygan","Chippewa","Clare","Clinton",
+  "Crawford","Delta","Dickinson","Eaton","Emmet","Genesee","Gladwin","Gogebic","Grand Traverse",
+  "Gratiot","Hillsdale","Houghton","Huron","Ingham","Ionia","Iosco","Iron","Isabella","Jackson",
+  "Kalamazoo","Kalkaska","Kent","Keweenaw","Lake","Lapeer","Leelanau","Lenawee","Livingston",
+  "Luce","Mackinac","Macomb","Manistee","Marquette","Mason","Mecosta","Menominee","Midland",
+  "Missaukee","Monroe","Montcalm","Montmorency","Muskegon","Newaygo","Oakland","Oceana",
+  "Ogemaw","Ontonagon","Osceola","Oscoda","Otsego","Ottawa","Presque Isle","Roscommon",
+  "Saginaw","St. Clair","St. Joseph","Sanilac","Schoolcraft","Shiawassee","Tuscola","Van Buren",
+  "Washtenaw","Wayne","Wexford"
+];
+
+const STATEWIDE_PROMPT = `You are a Michigan frost law monitoring assistant for trucking companies.
+Search for current Michigan frost law and spring weight restriction information.
+Respond ONLY with a valid JSON array. No markdown, no backticks, no extra text.
+Each item: {"title":"string","status":"ACTIVE|LIFTED|PENDING|INFO","description":"under 60 words","source":"string","date":"string","liftDate":"string or null","weightLimit":"string or null","normalLimit":"string or null","roadClass":"string or null","roads":"string or null","counties":"string or null","fineInfo":"string or null","contactPhone":"string or null","url":"string or null"}
+Return exactly 4 items.`;
+
+const COUNTY_PROMPT = `You are a Michigan frost law expert for trucking companies.
+Search for frost law details for the requested Michigan county.
+Respond ONLY with a valid JSON array. No markdown, no backticks, no extra text.
+Each item: {"title":"string","status":"ACTIVE|LIFTED|PENDING|INFO","description":"under 35 words","source":"string","date":"string","liftDate":"string or null","weightLimit":"string or null","normalLimit":"string or null","roadClass":"string or null","roads":"string or null","counties":"string","fineInfo":"string or null","contactPhone":"string or null","url":"string or null"}
+Return exactly 2 items.`;
+
+const ROUTE_PROMPT = `You are a Michigan frost law expert and routing assistant for trucking companies.
+The user gives two addresses. Search for current Michigan frost law data, then respond with ONLY a single JSON object — not an array, not markdown, no backticks, no explanation. Just raw JSON starting with { and ending with }.
+Required format (fill in real values):
+{"origin":{"lat":42.33,"lon":-83.05,"display":"Detroit, MI, USA"},"destination":{"lat":42.96,"lon":-85.66,"display":"Grand Rapids, MI, USA"},"distanceMi":"148","duration":"2h 20m","counties":["Wayne","Oakland","Kent"],"restrictions":[{"county":"Wayne","status":"ACTIVE","weightLimit":"35000 lbs","liftDate":"April 15","roadClass":"Local Roads","roads":"All local roads","warning":"Weight limits reduced on all local roads.","url":null}]}
+Use real coordinates, real county names, and real current frost law data from your search.`;
+
+async function runAgentLoop(userMessage, systemPrompt) {
+  const messages = [{ role: "user", content: userMessage }];
+  for (let i = 0; i < 6; i++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": window.NAJ_API_KEY || "", "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 3000,
+        system: systemPrompt,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `API error: HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    messages.push({ role: "assistant", content: data.content });
+    if (data.stop_reason === "end_turn") {
+      const t = data.content.find(b => b.type === "text");
+      if (!t) throw new Error("No text in response");
+      return t.text;
+    }
+    if (data.stop_reason === "tool_use") {
+      const results = data.content.filter(b => b.type === "tool_use")
+        .map(b => ({ type: "tool_result", tool_use_id: b.id, content: "Search executed." }));
+      if (!results.length) throw new Error("Tool use missing id");
+      messages.push({ role: "user", content: results });
+    } else {
+      const t = data.content.find(b => b.type === "text");
+      if (t) return t.text;
+      throw new Error(`Unexpected stop_reason: ${data.stop_reason}`);
+    }
+  }
+  throw new Error("Agent loop exceeded max iterations");
+}
+
+function parseJSON(raw) {
+  const s = raw.replace(/```[\w]*\n?/g, "").replace(/```/g, "").trim();
+  // Try array
+  const as = s.indexOf("["), ae = s.lastIndexOf("]");
+  if (as !== -1 && ae > as) { try { return JSON.parse(s.slice(as, ae + 1)); } catch(e) {} }
+  // Try object (wrap in array)
+  const os = s.indexOf("{"), oe = s.lastIndexOf("}");
+  if (os !== -1 && oe > os) { try { return JSON.parse(s.slice(os, oe + 1)); } catch(e) {} }
+  throw new Error("No JSON found. Got: " + raw.slice(0, 120));
+}
+
+function parseRouteJSON(raw) {
+  const s = raw.replace(/```[\w]*\n?/g, "").replace(/```/g, "").trim();
+  // Try object first
+  const os = s.indexOf("{"), oe = s.lastIndexOf("}");
+  if (os !== -1 && oe > os) {
+    try { return JSON.parse(s.slice(os, oe + 1)); } catch(e) {}
+  }
+  // Fallback: try array and take first element if it looks like a route object
+  const as = s.indexOf("["), ae = s.lastIndexOf("]");
+  if (as !== -1 && ae > as) {
+    try {
+      const arr = JSON.parse(s.slice(as, ae + 1));
+      if (Array.isArray(arr) && arr[0]?.origin) return arr[0];
+      // Maybe the model returned restrictions as a bare array - wrap it
+      if (Array.isArray(arr) && arr[0]?.county) {
+        return { origin: { lat: 0, lon: 0, display: "See restrictions below" }, destination: { lat: 0, lon: 0, display: "" }, distanceMi: "N/A", duration: "N/A", counties: arr.map(r => r.county), restrictions: arr };
+      }
+    } catch(e) {}
+  }
+  throw new Error("Could not parse route response. Raw: " + raw.slice(0, 200));
+}
+
+const STATUS = {
+  ACTIVE:  { bg: "#7A3A00", border: "#C97A00", badge: "#C97A00", label: "⚠ ACTIVE RESTRICTION" },
+  LIFTED:  { bg: "#0D2A0D", border: C.green,   badge: C.green,   label: "✓ LIFTED" },
+  PENDING: { bg: "#2A1A00", border: C.orange,  badge: C.orange,  label: "◷ PENDING" },
+  INFO:    { bg: "#0D1A2A", border: C.blue,    badge: C.blue,    label: "ℹ INFO" },
+};
+
+const STEPS = ["QUERYING MDOT…","CHECKING RESTRICTIONS…","ANALYZING DATA…","COMPILING RESULTS…"];
+const STORAGE_KEY = "frost-v1-data";
+const STORAGE_META = "frost-v1-meta";
+
+function useLoadingCycle() {
+  const [step, setStep] = useState(0);
+  const start = () => {
+    setStep(0);
+    const id = setInterval(() => setStep(s => (s + 1) % STEPS.length), 2500);
+    return id;
+  };
+  return [STEPS[step], start];
+}
+
+function InfoRow({ icon, label, value, highlight }) {
+  if (!value) return null;
+  return (
+    <div style={{ display: "flex", gap: "8px", padding: "4px 0", borderBottom: `1px solid ${C.border}`, alignItems: "flex-start" }}>
+      <span style={{ flexShrink: 0 }}>{icon}</span>
+      <span style={{ fontSize: "11px", color: C.grayDark, letterSpacing: "1px", textTransform: "uppercase", minWidth: "110px", flexShrink: 0 }}>{label}</span>
+      <span style={{ fontSize: "13px", color: highlight ? C.goldBright : C.white, fontWeight: highlight ? "700" : "400" }}>{value}</span>
+    </div>
+  );
+}
+
+function Card({ u, onSave, isSaved }) {
+  const [open, setOpen] = useState(false);
+  const sc = STATUS[u.status] || STATUS.INFO;
+  return (
+    <div style={{ background: sc.bg, border: `1px solid ${sc.border}`, borderLeft: `4px solid ${sc.badge}`, borderRadius: "3px" }}>
+      <div style={{ padding: "16px 18px", cursor: "pointer" }} onClick={() => setOpen(!open)}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "6px", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ background: sc.badge, color: "#fff", padding: "2px 10px", borderRadius: "2px", fontSize: "10px", fontWeight: "700", letterSpacing: "1.5px" }}>{sc.label}</span>
+              {u.counties && <span style={{ fontSize: "11px", color: C.gray }}>📍 {u.counties}</span>}
+              <span style={{ fontSize: "11px", color: C.grayDark }}>{u.source} · {u.date}</span>
+            </div>
+            <div style={{ fontSize: "15px", fontWeight: "700", marginBottom: "4px" }}>{u.title}</div>
+            <div style={{ fontSize: "13px", color: "#BBBBBB", lineHeight: "1.6" }}>{u.description}</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "6px", flexShrink: 0 }}>
+            <span style={{ color: C.gold }}>{open ? "▲" : "▼"}</span>
+            {u.weightLimit && <span style={{ background: C.goldDim, border: `1px solid ${C.gold}`, color: C.goldBright, padding: "3px 10px", borderRadius: "2px", fontSize: "12px", fontWeight: "700" }}>⚖ {u.weightLimit}</span>}
+          </div>
+        </div>
+      </div>
+      {open && (
+        <div style={{ padding: "0 18px 16px", borderTop: `1px solid ${C.border}` }}>
+          <div style={{ marginTop: "12px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px" }}>
+            <InfoRow icon="⚖" label="Restricted Limit" value={u.weightLimit} highlight />
+            <InfoRow icon="📏" label="Normal Limit" value={u.normalLimit} />
+            <InfoRow icon="📅" label="In Effect Since" value={u.date} />
+            <InfoRow icon="🔓" label="Expected Lift" value={u.liftDate} highlight={!!u.liftDate} />
+            <InfoRow icon="🛣" label="Road Class" value={u.roadClass} />
+            <InfoRow icon="🗺" label="Affected Routes" value={u.roads} />
+            <InfoRow icon="📍" label="Counties" value={u.counties} />
+            <InfoRow icon="💰" label="Fine Info" value={u.fineInfo} />
+            <InfoRow icon="📞" label="MDOT Contact" value={u.contactPhone} />
+          </div>
+          <div style={{ display: "flex", gap: "8px", marginTop: "14px", flexWrap: "wrap" }}>
+            {u.url && <a href={u.url} target="_blank" rel="noopener noreferrer"
+              style={{ border: `1px solid ${C.border}`, color: C.gray, padding: "6px 14px", borderRadius: "3px", fontSize: "11px", letterSpacing: "1px", textDecoration: "none" }}
+              onMouseOver={e => { e.currentTarget.style.borderColor = C.gold; e.currentTarget.style.color = C.gold; }}
+              onMouseOut={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.gray; }}>SOURCE ↗</a>}
+            <button onClick={() => onSave(u)} style={{ background: isSaved ? "#0D2A0D" : "transparent", border: `1px solid ${isSaved ? C.green : C.border}`, color: isSaved ? "#66BB6A" : C.gray, padding: "6px 14px", borderRadius: "3px", fontSize: "11px", cursor: "pointer", fontFamily: "inherit", letterSpacing: "1px", textTransform: "uppercase" }}>
+              {isSaved ? "✓ SAVED" : "+ SAVE"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Spinner({ msg }) {
+  return (
+    <div style={{ textAlign: "center", padding: "50px 20px", color: C.grayDark }}>
+      <div style={{ fontSize: "36px", display: "inline-block", animation: "spin 1s linear infinite" }}>⟳</div>
+      <div style={{ fontSize: "12px", letterSpacing: "2px", marginTop: "10px", animation: "pulse 2s ease-in-out infinite" }}>{msg}</div>
+    </div>
+  );
+}
+
+function ErrBox({ msg, onRetry }) {
+  return (
+    <div style={{ background: "#1A0A0A", border: `1px solid #C97A00`, borderRadius: "3px", padding: "14px 18px", color: "#FFAA44", fontSize: "13px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+      <span>⚠ {msg}</span>
+      {onRetry && <button onClick={onRetry} style={{ background: "none", border: `1px solid #FFAA44`, color: "#FFAA44", padding: "4px 14px", borderRadius: "3px", cursor: "pointer", fontFamily: "inherit", fontSize: "11px" }}>RETRY</button>}
+    </div>
+  );
+}
+
+// ── Statewide Tab ─────────────────────────────────────────────────────────────
+function StatewideTab({ saved, onSave }) {
+  const [loading, setLoading] = useState(false);
+  const [updates, setUpdates] = useState([]);
+  const [error, setError] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [fromCache, setFromCache] = useState(false);
+  const [stepMsg, startSteps] = useLoadingCycle();
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const meta = await window.storage.get(STORAGE_META, true);
+        const data = await window.storage.get(STORAGE_KEY, true);
+        if (meta && data) {
+          setUpdates(JSON.parse(data.value));
+          setLastUpdated(new Date(JSON.parse(meta.value).updatedAt));
+          setFromCache(true);
+        } else { fetch_(); }
+      } catch { fetch_(); }
+    })();
+  }, []);
+
+  const fetch_ = async () => {
+    setLoading(true); setError(null); setFromCache(false);
+    const id = startSteps();
+    try {
+      const raw = await runAgentLoop(
+        `Search for current Michigan frost law spring weight restriction updates statewide. Include weight limits, road classes, routes, fines, and lift dates. Today: ${new Date().toLocaleDateString()}.`,
+        STATEWIDE_PROMPT
+      );
+      const parsed = parseJSON(raw);
+      const now = new Date();
+      setUpdates(parsed); setLastUpdated(now);
+      await window.storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
+      await window.storage.set(STORAGE_META, JSON.stringify({ updatedAt: now.toISOString() }), true);
+    } catch (e) { setError(e.message); }
+    finally { clearInterval(id); setLoading(false); }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "20px", flexWrap: "wrap" }}>
+        <button onClick={fetch_} disabled={loading} style={{ background: loading ? C.surfaceAlt : C.gold, color: loading ? C.gray : "#0A0A0A", border: `1px solid ${loading ? C.border : C.gold}`, padding: "9px 22px", borderRadius: "3px", fontSize: "12px", fontWeight: "700", letterSpacing: "2px", cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit", textTransform: "uppercase" }}>
+          {loading ? `⟳ ${stepMsg}` : "⟳ REFRESH"}
+        </button>
+        {lastUpdated && <span style={{ fontSize: "11px", color: C.grayDark }}>{fromCache ? "📦 CACHED · " : ""}UPDATED {lastUpdated.toLocaleTimeString()}</span>}
+      </div>
+      {error && <ErrBox msg={error} onRetry={fetch_} />}
+      {loading && <Spinner msg={stepMsg} />}
+      {!loading && updates.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div style={{ fontSize: "11px", color: C.grayDark, letterSpacing: "2px", marginBottom: "2px" }}>CLICK ANY CARD TO EXPAND FULL DETAILS</div>
+          {updates.map((u, i) => <Card key={i} u={u} onSave={onSave} isSaved={!!saved.find(a => a.title === u.title)} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── County Tab ────────────────────────────────────────────────────────────────
+function CountyTab({ saved, onSave }) {
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [showDrop, setShowDrop] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState([]);
+  const [error, setError] = useState(null);
+  const [stepMsg, startSteps] = useLoadingCycle();
+
+  const filtered = ALL_COUNTIES.filter(c => search.length > 0 && c.toLowerCase().includes(search.toLowerCase()));
+
+  const fetchCounty = async (county) => {
+    setLoading(true); setError(null); setResults([]);
+    const id = startSteps();
+    try {
+      const raw = await runAgentLoop(
+        `Search for current frost law and spring weight restriction details specifically for ${county} County, Michigan. Today: ${new Date().toLocaleDateString()}.`,
+        COUNTY_PROMPT
+      );
+      setResults(parseJSON(raw));
+    } catch (e) { setError(e.message); }
+    finally { clearInterval(id); setLoading(false); }
+  };
+
+  const select = (c) => { setSelected(c); setSearch(c); setShowDrop(false); fetchCounty(c); };
+
+  return (
+    <div>
+      <div style={{ fontSize: "13px", color: C.gray, marginBottom: "14px" }}>Search any of Michigan's 83 counties for specific frost law restrictions.</div>
+      <div style={{ position: "relative", maxWidth: "400px", marginBottom: "24px" }}>
+        <input type="text" placeholder="Type a county name…" value={search}
+          onChange={e => { setSearch(e.target.value); setShowDrop(true); }}
+          onFocus={() => setShowDrop(true)}
+          style={{ width: "100%", background: C.surface, border: `1px solid ${C.gold}`, color: C.white, padding: "11px 16px", borderRadius: "3px", fontSize: "14px", fontFamily: "inherit", outline: "none" }} />
+        {showDrop && filtered.length > 0 && (
+          <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 3px 3px", zIndex: 100, maxHeight: "220px", overflowY: "auto" }}>
+            {filtered.map(c => (
+              <div key={c} onClick={() => select(c)}
+                style={{ padding: "10px 16px", cursor: "pointer", fontSize: "13px", borderBottom: `1px solid ${C.border}` }}
+                onMouseOver={e => e.currentTarget.style.background = C.goldDim}
+                onMouseOut={e => e.currentTarget.style.background = "transparent"}>
+                📍 {c} County
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {loading && <Spinner msg={stepMsg} />}
+      {error && <ErrBox msg={error} onRetry={() => selected && fetchCounty(selected)} />}
+      {!loading && results.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div style={{ fontSize: "13px", color: C.gold, fontWeight: "700", letterSpacing: "2px", marginBottom: "4px", textTransform: "uppercase" }}>📍 {selected} County</div>
+          {results.map((u, i) => <Card key={i} u={u} onSave={onSave} isSaved={!!saved.find(a => a.title === u.title)} />)}
+          <button onClick={() => selected && fetchCounty(selected)} style={{ background: "transparent", color: C.gray, border: `1px solid ${C.border}`, padding: "8px 18px", borderRadius: "3px", fontSize: "11px", fontWeight: "700", letterSpacing: "1.5px", cursor: "pointer", fontFamily: "inherit", textTransform: "uppercase", alignSelf: "flex-start" }}>⟳ REFRESH {selected?.toUpperCase()}</button>
+        </div>
+      )}
+      {!loading && !error && results.length === 0 && (
+        <div style={{ textAlign: "center", padding: "40px 20px", color: C.grayDark }}>
+          <div style={{ fontSize: "32px", marginBottom: "10px" }}>🔍</div>
+          <div style={{ fontSize: "13px" }}>Type a county name above to search.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── Michigan SVG Route Map ────────────────────────────────────────────────────
+// County centroids [lon, lat] for Michigan
+const COUNTY_CENTROIDS = {
+  "Alcona":[-83.63,44.67],"Alger":[-86.55,46.44],"Allegan":[-85.90,42.59],"Alpena":[-83.77,45.06],
+  "Antrim":[-85.17,44.99],"Arenac":[-83.97,44.02],"Baraga":[-88.41,46.76],"Barry":[-85.31,42.60],
+  "Bay":[-83.99,43.72],"Benzie":[-86.25,44.64],"Berrien":[-86.43,41.93],"Branch":[-85.06,41.91],
+  "Calhoun":[-85.00,42.25],"Cass":[-85.99,41.92],"Charlevoix":[-85.26,45.35],"Cheboygan":[-84.48,45.44],
+  "Chippewa":[-84.57,46.36],"Clare":[-84.84,43.98],"Clinton":[-84.60,42.94],"Crawford":[-84.61,44.68],
+  "Delta":[-86.80,45.93],"Dickinson":[-87.84,46.00],"Eaton":[-84.86,42.60],"Emmet":[-84.90,45.56],
+  "Genesee":[-83.71,43.02],"Gladwin":[-84.48,43.97],"Gogebic":[-89.77,46.58],"Grand Traverse":[-85.57,44.75],
+  "Gratiot":[-84.60,43.28],"Hillsdale":[-84.58,41.88],"Houghton":[-88.66,47.13],"Huron":[-83.02,43.96],
+  "Ingham":[-84.37,42.59],"Ionia":[-85.07,42.95],"Iosco":[-83.70,44.37],"Iron":[-88.48,46.27],
+  "Isabella":[-84.85,43.65],"Jackson":[-84.42,42.25],"Kalamazoo":[-85.53,42.27],"Kalkaska":[-85.17,44.73],
+  "Kent":[-85.55,43.03],"Keweenaw":[-87.97,47.49],"Lake":[-85.76,43.95],"Lapeer":[-83.19,43.09],
+  "Leelanau":[-85.84,45.05],"Lenawee":[-84.05,41.89],"Livingston":[-83.91,42.59],"Luce":[-85.50,46.47],
+  "Mackinac":[-84.90,46.07],"Macomb":[-82.92,42.68],"Manistee":[-86.23,44.25],"Marquette":[-87.60,46.56],
+  "Mason":[-86.40,43.96],"Mecosta":[-85.33,43.64],"Menominee":[-87.56,45.48],"Midland":[-84.37,43.63],
+  "Missaukee":[-85.10,44.34],"Monroe":[-83.52,41.92],"Montcalm":[-85.15,43.31],"Montmorency":[-84.13,45.02],
+  "Muskegon":[-86.27,43.33],"Newaygo":[-85.80,43.52],"Oakland":[-83.38,42.66],"Oceana":[-86.52,43.69],
+  "Ogemaw":[-84.12,44.34],"Ontonagon":[-89.38,46.72],"Osceola":[-85.32,43.98],"Oscoda":[-84.20,44.68],
+  "Otsego":[-84.62,45.02],"Ottawa":[-85.95,42.95],"Presque Isle":[-83.96,45.37],"Roscommon":[-84.60,44.35],
+  "Saginaw":[-84.06,43.41],"St. Clair":[-82.66,42.91],"St. Joseph":[-85.53,41.92],"Sanilac":[-82.73,43.43],
+  "Schoolcraft":[-86.25,46.15],"Shiawassee":[-84.15,42.95],"Tuscola":[-83.44,43.50],"Van Buren":[-86.23,42.26],
+  "Washtenaw":[-83.73,42.25],"Wayne":[-83.26,42.34],"Wexford":[-85.57,44.32]
+};
+
+function MichiganRouteMap({ result }) {
+  if (!result) return null;
+
+  // Michigan bounding box
+  const LON_MIN = -90.5, LON_MAX = -82.0, LAT_MIN = 41.6, LAT_MAX = 48.3;
+  const W = 600, H = 460;
+
+  const project = (lon, lat) => ({
+    x: ((lon - LON_MIN) / (LON_MAX - LON_MIN)) * W,
+    y: H - ((lat - LAT_MIN) / (LAT_MAX - LAT_MIN)) * H,
+  });
+
+  const counties = result.counties || [];
+  const restrictions = result.restrictions || [];
+  const activeSet = new Set(restrictions.filter(r => r.status === "ACTIVE").map(r => r.county));
+
+  // Build route polyline through county centroids in order
+  const routePoints = counties
+    .filter(c => COUNTY_CENTROIDS[c])
+    .map(c => project(...COUNTY_CENTROIDS[c]));
+
+  // Origin and destination
+  const hasOrigin = result.origin?.lat && result.origin?.lon && result.origin.lat !== 0;
+  const hasDest = result.destination?.lat && result.destination?.lon && result.destination.lat !== 0;
+  const originPt = hasOrigin ? project(result.origin.lon, result.origin.lat) : null;
+  const destPt = hasDest ? project(result.destination.lon, result.destination.lat) : null;
+
+  const allPts = [
+    ...(originPt ? [originPt] : []),
+    ...routePoints,
+    ...(destPt ? [destPt] : []),
+  ];
+  const polyline = allPts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+  const mapUrl = hasOrigin && hasDest
+    ? `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${result.origin.lat},${result.origin.lon};${result.destination.lat},${result.destination.lon}`
+    : null;
+
+  return (
+    <div style={{ marginBottom: "20px" }}>
+      <div style={{ fontSize: "11px", color: C.grayDark, letterSpacing: "2px", marginBottom: "8px" }}>ROUTE MAP</div>
+      <div style={{ background: "#1A1A2E", border: `1px solid ${C.gold}`, borderRadius: "3px", padding: "0", width: "100%", minHeight: "420px", position: "relative" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%" style={{ display: "block" }}>
+          {/* Background */}
+          <rect width={W} height={H} fill="#1A1A2E" />
+          {/* Subtle grid */}
+          <line x1="0" y1={H/2} x2={W} y2={H/2} stroke="#2A2A3A" strokeWidth="0.5" />
+          <line x1={W/2} y1="0" x2={W/2} y2={H} stroke="#2A2A3A" strokeWidth="0.5" />
+
+          {/* All county dots */}
+          {Object.entries(COUNTY_CENTROIDS).map(([name, [lon, lat]]) => {
+            const p = project(lon, lat);
+            const onRoute = counties.includes(name);
+            const isActive = activeSet.has(name);
+            return (
+              <g key={name}>
+                <circle cx={p.x} cy={p.y} r={onRoute ? 8 : 4}
+                  fill={isActive ? "#C97A00" : onRoute ? C.gold : "#333355"}
+                  stroke={onRoute ? (isActive ? "#FFD580" : C.white) : "#555577"}
+                  strokeWidth={onRoute ? 1.5 : 0.8}
+                  opacity={onRoute ? 1 : 0.7}
+                />
+                {onRoute && (
+                  <text x={p.x} y={p.y - 11} textAnchor="middle" fontSize="9" fill={isActive ? "#FFD580" : C.goldBright} fontFamily="Arial" fontWeight="bold">
+                    {isActive ? "⚠ " : ""}{name}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Route line */}
+          {allPts.length > 1 && (
+            <polyline points={polyline} fill="none" stroke={C.goldBright} strokeWidth="4" strokeOpacity="0.95" strokeDasharray="8,4" />
+          )}
+
+          {/* Origin marker */}
+          {originPt && (
+            <g>
+              <circle cx={originPt.x} cy={originPt.y} r={14} fill="#2E7D32" stroke="white" strokeWidth="2" />
+              <text x={originPt.x} y={originPt.y + 5} textAnchor="middle" fontSize="13" fill="white" fontFamily="Arial" fontWeight="bold">A</text>
+              <text x={originPt.x} y={originPt.y + 26} textAnchor="middle" fontSize="9" fill="#66BB6A" fontFamily="Arial" fontWeight="bold">ORIGIN</text>
+            </g>
+          )}
+
+          {/* Destination marker */}
+          {destPt && (
+            <g>
+              <circle cx={destPt.x} cy={destPt.y} r={14} fill="#C97A00" stroke="white" strokeWidth="2" />
+              <text x={destPt.x} y={destPt.y + 5} textAnchor="middle" fontSize="13" fill="white" fontFamily="Arial" fontWeight="bold">B</text>
+              <text x={destPt.x} y={destPt.y + 26} textAnchor="middle" fontSize="9" fill="#FFD580" fontFamily="Arial" fontWeight="bold">DEST</text>
+            </g>
+          )}
+
+          {/* Legend */}
+          <g transform="translate(8, 8)">
+            <rect width="130" height="58" fill="#141414" fillOpacity="0.9" rx="3" />
+            <circle cx="14" cy="14" r="5" fill="#2E7D32" stroke="white" strokeWidth="1" />
+            <text x="24" y="18" fontSize="9" fill={C.white} fontFamily="Arial">Origin</text>
+            <circle cx="14" cy="30" r="5" fill="#C97A00" stroke="white" strokeWidth="1" />
+            <text x="24" y="34" fontSize="9" fill={C.white} fontFamily="Arial">Destination</text>
+            <circle cx="14" cy="46" r="5" fill={C.gold} />
+            <text x="24" y="50" fontSize="9" fill={C.white} fontFamily="Arial">Route county</text>
+          </g>
+          <g transform={`translate(${W-100}, 8)`}>
+            <rect width="92" height="26" fill="#141414" fillOpacity="0.9" rx="3" />
+            <circle cx="10" cy="13" r="5" fill="#C97A00" />
+            <text x="20" y="17" fontSize="9" fill="#FFD580" fontFamily="Arial">Active restriction</text>
+          </g>
+        </svg>
+        {mapUrl && (
+          <div style={{ textAlign: "center", marginTop: "8px" }}>
+            <a href={mapUrl} target="_blank" rel="noopener noreferrer"
+              style={{ fontSize: "11px", color: C.gold, letterSpacing: "1px" }}>
+              Open driving directions in OpenStreetMap ↗
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Route Tab ─────────────────────────────────────────────────────────────────
+function RouteTab() {
+  const [origin, setOrigin] = useState("");
+  const [dest, setDest] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [stepMsg, startSteps] = useLoadingCycle();
+
+  const plan = async () => {
+    if (!origin.trim() || !dest.trim()) return;
+    setLoading(true); setError(null); setResult(null);
+    const id = startSteps();
+    try {
+      const raw = await runAgentLoop(
+        `Plan a Michigan trucking route from "${origin}" to "${dest}". Geocode both addresses, list all Michigan counties along the route, and look up current frost law restrictions for each county. Today: ${new Date().toLocaleDateString()}.`,
+        ROUTE_PROMPT
+      );
+      const parsed = parseRouteJSON(raw);
+      if (!parsed.origin || !parsed.destination) throw new Error("Missing route data in response.");
+      setResult(parsed);
+    } catch (e) { setError(e.message); }
+    finally { clearInterval(id); setLoading(false); }
+  };
+
+
+
+  const badge = (s) => {
+    if (s === "ACTIVE") return { bg: "#C97A00", text: "⚠ ACTIVE" };
+    if (s === "LIFTED") return { bg: C.green, text: "✓ LIFTED" };
+    if (s === "PENDING") return { bg: C.orange, text: "◷ PENDING" };
+    return { bg: C.blue, text: "ℹ INFO" };
+  };
+
+  const active = result?.restrictions?.filter(r => r.status === "ACTIVE") || [];
+
+  return (
+    <div>
+      <div style={{ fontSize: "13px", color: C.gray, marginBottom: "16px", lineHeight: "1.7" }}>
+        Enter origin and destination. Claude will identify Michigan counties along your route and check active frost law restrictions for each one.
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
+        {[["🟢 Origin", origin, setOrigin, "e.g. Detroit, MI"], ["🏁 Destination", dest, setDest, "e.g. Grand Rapids, MI"]].map(([lbl, val, set, ph]) => (
+          <div key={lbl}>
+            <label style={{ display: "block", fontSize: "11px", color: C.grayDark, letterSpacing: "2px", marginBottom: "6px", textTransform: "uppercase" }}>{lbl}</label>
+            <input value={val} onChange={e => set(e.target.value)} onKeyDown={e => e.key === "Enter" && !loading && plan()}
+              placeholder={ph}
+              style={{ width: "100%", background: C.surface, border: `1px solid ${C.border}`, color: C.white, padding: "10px 14px", borderRadius: "3px", fontSize: "14px", fontFamily: "inherit", outline: "none" }}
+              onFocus={e => e.target.style.borderColor = C.gold}
+              onBlur={e => e.target.style.borderColor = C.border} />
+          </div>
+        ))}
+      </div>
+      <button onClick={plan} disabled={loading || !origin.trim() || !dest.trim()}
+        style={{ background: loading ? C.surfaceAlt : C.gold, color: loading ? C.gray : "#0A0A0A", border: `1px solid ${loading ? C.border : C.gold}`, padding: "10px 26px", borderRadius: "3px", fontSize: "12px", fontWeight: "700", letterSpacing: "2px", cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit", textTransform: "uppercase", marginBottom: "20px" }}>
+        {loading ? `⟳ ${stepMsg}` : "🗺 PLAN ROUTE & CHECK FROST LAWS"}
+      </button>
+
+      {error && <ErrBox msg={error} />}
+      {loading && <Spinner msg={stepMsg} />}
+
+      {result && !loading && (
+        <>
+          {active.length > 0 && (
+            <div style={{ background: "#2A1500", border: "2px solid #C97A00", borderRadius: "3px", padding: "14px 18px", marginBottom: "14px" }}>
+              <div style={{ fontSize: "12px", fontWeight: "700", color: "#FFAA44", letterSpacing: "2px", marginBottom: "4px" }}>⚠ {active.length} ACTIVE RESTRICTION{active.length > 1 ? "S" : ""} ON THIS ROUTE</div>
+              <div style={{ fontSize: "13px", color: "#FFD580" }}>{active.map(r => r.county).join(", ")} {active.length === 1 ? "County has" : "Counties have"} active weight restrictions. Review below before dispatch.</div>
+            </div>
+          )}
+
+          <div style={{ background: C.surface, border: `1px solid ${C.gold}`, borderRadius: "3px", padding: "14px 18px", marginBottom: "14px" }}>
+            <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", marginBottom: "10px" }}>
+              <div><div style={{ fontSize: "10px", color: C.grayDark, letterSpacing: "2px", marginBottom: "2px" }}>DISTANCE</div><div style={{ fontSize: "20px", fontWeight: "900", color: C.goldBright }}>{result.distanceMi} mi</div></div>
+              <div><div style={{ fontSize: "10px", color: C.grayDark, letterSpacing: "2px", marginBottom: "2px" }}>EST. DRIVE TIME</div><div style={{ fontSize: "20px", fontWeight: "900", color: C.goldBright }}>{result.duration}</div></div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: "10px", color: C.grayDark, letterSpacing: "2px", marginBottom: "6px" }}>COUNTIES ALONG ROUTE ({result.counties?.length || 0})</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                  {(result.counties || []).map(c => {
+                    const hot = result.restrictions?.find(r => r.county === c && r.status === "ACTIVE");
+                    return <span key={c} style={{ background: hot ? "#2A1500" : C.surfaceAlt, border: `1px solid ${hot ? "#C97A00" : C.border}`, color: hot ? "#FFAA44" : C.gray, padding: "2px 8px", borderRadius: "2px", fontSize: "11px", fontWeight: hot ? "700" : "400" }}>{hot ? "⚠ " : ""}{c}</span>;
+                  })}
+                </div>
+              </div>
+            </div>
+            <div style={{ fontSize: "11px", color: C.grayDark, borderTop: `1px solid ${C.border}`, paddingTop: "8px" }}>
+              🟢 {result.origin.display} &nbsp;→&nbsp; 🏁 {result.destination.display}
+            </div>
+          </div>
+
+          {result && <MichiganRouteMap result={result} />}
+
+          {result.restrictions && result.restrictions.length > 0 && (
+            <div>
+              <div style={{ fontSize: "11px", letterSpacing: "3px", color: C.grayDark, marginBottom: "10px", fontWeight: "700" }}>FROST LAW STATUS BY COUNTY</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {result.restrictions.map((w, i) => {
+                  const b = badge(w.status);
+                  return (
+                    <div key={i} style={{ background: C.surface, border: `1px solid ${w.status === "ACTIVE" ? "#C97A00" : C.border}`, borderLeft: `4px solid ${b.bg}`, borderRadius: "3px", padding: "14px 16px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: "flex", gap: "10px", marginBottom: "6px", flexWrap: "wrap", alignItems: "center" }}>
+                            <span style={{ background: b.bg, color: "#fff", padding: "2px 10px", borderRadius: "2px", fontSize: "10px", fontWeight: "700", letterSpacing: "1.5px" }}>{b.text}</span>
+                            <span style={{ fontSize: "14px", fontWeight: "700", color: C.goldBright }}>📍 {w.county} County</span>
+                          </div>
+                          {w.warning && <div style={{ fontSize: "13px", color: "#FFAA44", marginBottom: "6px", fontWeight: "700" }}>⚠ {w.warning}</div>}
+                          <div style={{ display: "flex", gap: "14px", flexWrap: "wrap" }}>
+                            {w.weightLimit && <span style={{ fontSize: "12px", color: C.goldBright, fontWeight: "700" }}>⚖ {w.weightLimit}</span>}
+                            {w.liftDate && <span style={{ fontSize: "12px", color: C.gray }}>🔓 Lifts: {w.liftDate}</span>}
+                            {w.roadClass && <span style={{ fontSize: "12px", color: C.gray }}>🛣 {w.roadClass}</span>}
+                          </div>
+                        </div>
+                        {w.url && <a href={w.url} target="_blank" rel="noopener noreferrer"
+                          style={{ border: `1px solid ${C.border}`, color: C.gray, padding: "5px 12px", borderRadius: "3px", fontSize: "11px", textDecoration: "none", flexShrink: 0 }}
+                          onMouseOver={e => { e.currentTarget.style.borderColor = C.gold; e.currentTarget.style.color = C.gold; }}
+                          onMouseOut={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.gray; }}>SOURCE ↗</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {result.restrictions?.length === 0 && (
+            <div style={{ background: "#0D2A0D", border: `1px solid ${C.green}`, borderRadius: "3px", padding: "14px 18px", color: "#66BB6A", fontSize: "13px" }}>
+              ✓ No active frost law restrictions found for counties along this route.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [tab, setTab] = useState("statewide");
+  const [saved, setSaved] = useState([]);
+  const [showShareBox, setShowShareBox] = useState(false);
+  const [unlocked, setUnlocked] = useState(() => sessionStorage.getItem("naj_unlocked") === "1");
+  const [pwInput, setPwInput] = useState("");
+  const [pwError, setPwError] = useState(false);
+  window.NAJ_API_KEY = "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";
+
+  const toggleSave = (u) => setSaved(prev =>
+    prev.find(a => a.title === u.title) ? prev.filter(a => a.title !== u.title)
+    : [...prev, { ...u, savedAt: new Date().toLocaleString() }]
+  );
+
+  const share = () => setShowShareBox(s => !s);
+
+  const tabBtn = (id, label) => (
+    <button onClick={() => setTab(id)} style={{ padding: "10px 18px", fontSize: "12px", fontWeight: "700", letterSpacing: "1.5px", textTransform: "uppercase", cursor: "pointer", fontFamily: "inherit", border: "none", borderBottom: tab === id ? `2px solid ${C.gold}` : "2px solid transparent", background: "transparent", color: tab === id ? C.goldBright : C.gray, transition: "all 0.15s", whiteSpace: "nowrap" }}>{label}</button>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.white, fontFamily: "'Arial Narrow', Arial, sans-serif" }}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}} *{box-sizing:border-box} a{text-decoration:none} select option,input{font-family:inherit} input::placeholder{color:${C.grayDark}}`}</style>
+
+      {/* Password Gate */}
+      {!unlocked && (
+        <div style={{ minHeight: "100vh", background: "#0A0A0A", display: "flex", alignItems: "center", justifyContent: "center", padding: "24px" }}>
+          <div style={{ background: "#141414", border: "2px solid #C9A84C", borderRadius: "6px", padding: "36px", maxWidth: "400px", width: "100%", textAlign: "center" }}>
+            <div style={{ marginBottom: "4px" }}>
+              <span style={{ fontSize: "32px", fontWeight: "900", letterSpacing: "3px", color: "#C9A84C" }}>NAJ</span>
+              <span style={{ fontSize: "15px", fontWeight: "700", letterSpacing: "4px", color: "#fff", marginLeft: "8px" }}>TRUCKING</span>
+            </div>
+            <div style={{ fontSize: "13px", color: "#888", letterSpacing: "2px", marginBottom: "28px" }}>MICHIGAN FROST LAW MONITOR</div>
+            <input
+              type="password"
+              placeholder="Enter password"
+              value={pwInput}
+              onChange={e => { setPwInput(e.target.value); setPwError(false); }}
+              onKeyDown={e => {
+                if (e.key === "Enter") {
+                  if (pwInput.trim().toUpperCase() === "NAJ") { sessionStorage.setItem("naj_unlocked","1"); setUnlocked(true); }
+                  else { setPwError(true); setPwInput(""); }
+                }
+              }}
+              style={{ width: "100%", background: "#0A0A0A", border: `2px solid ${pwError ? "#C97A00" : "#2A2A2A"}`, color: "#fff", padding: "12px 16px", borderRadius: "3px", fontSize: "16px", fontFamily: "inherit", outline: "none", marginBottom: "10px", textAlign: "center", letterSpacing: "4px" }}
+              onFocus={e => e.target.style.borderColor = "#C9A84C"}
+              onBlur={e => e.target.style.borderColor = pwError ? "#C97A00" : "#2A2A2A"}
+            />
+            {pwError && <div style={{ color: "#FFAA44", fontSize: "12px", marginBottom: "10px" }}>Incorrect password. Please try again.</div>}
+            <button onClick={() => {
+              if (pwInput.trim().toUpperCase() === "NAJ") { sessionStorage.setItem("naj_unlocked","1"); setUnlocked(true); }
+              else { setPwError(true); setPwInput(""); }
+            }} style={{ width: "100%", background: "#C9A84C", color: "#0A0A0A", border: "none", padding: "12px", borderRadius: "3px", fontSize: "13px", fontWeight: "700", letterSpacing: "3px", cursor: "pointer", fontFamily: "inherit", textTransform: "uppercase" }}>
+              ENTER
+            </button>
+            <div style={{ fontSize: "11px", color: "#444", marginTop: "20px" }}>NAJ Trucking, Inc. · Authorized Personnel Only</div>
+          </div>
+        </div>
+      )}
+      {unlocked && <>
+      {/* Gold accent bar */}
+      <div style={{ background: C.gold, height: "6px", width: "100%" }} />
+
+      {/* Header */}
+      <div style={{ background: C.surface, borderBottom: `3px solid ${C.gold}`, padding: "16px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+          <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", flexShrink: 0 }}>
+            <span style={{ fontSize: "28px", fontWeight: "900", letterSpacing: "3px", color: C.gold, lineHeight: 1 }}>NAJ</span>
+            <span style={{ fontSize: "12px", fontWeight: "700", letterSpacing: "4px", color: C.white, lineHeight: 1.4 }}>TRUCKING</span>
+          </div>
+          <div style={{ width: "2px", height: "44px", background: C.border }} />
+          <div>
+            <div style={{ fontSize: "20px", fontWeight: "900", letterSpacing: "2px", textTransform: "uppercase" }}>Michigan Frost Law Monitor</div>
+            <div style={{ fontSize: "11px", color: C.gray, letterSpacing: "2px" }}>SPRING WEIGHT RESTRICTION TRACKER</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+          <button onClick={share} style={{ background: showShareBox ? C.gold : "transparent", color: showShareBox ? "#0A0A0A" : C.gray, border: `1px solid ${showShareBox ? C.gold : C.border}`, padding: "7px 14px", borderRadius: "3px", fontSize: "11px", fontWeight: "700", letterSpacing: "1.5px", cursor: "pointer", fontFamily: "inherit", textTransform: "uppercase" }}>🔗 SHARE</button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "0 24px", display: "flex", overflowX: "auto" }}>
+        {tabBtn("statewide", "🗺 Statewide")}
+        {tabBtn("county", "🔍 County Search")}
+        {tabBtn("route", "🚛 Route Planner")}
+        {saved.length > 0 && tabBtn("saved", `📌 Saved (${saved.length})`)}
+      </div>
+
+      <div style={{ padding: "20px 24px", maxWidth: "980px", margin: "0 auto" }}>
+        {/* Source links */}
+        <div style={{ display: "flex", gap: "8px", marginBottom: "18px", flexWrap: "wrap" }}>
+          {SOURCES.map(s => (
+            <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer"
+              style={{ display: "flex", alignItems: "center", gap: "6px", background: C.surface, border: `1px solid ${C.border}`, color: C.gray, padding: "5px 12px", borderRadius: "3px", fontSize: "11px", letterSpacing: "1px" }}
+              onMouseOver={e => { e.currentTarget.style.borderColor = C.gold; e.currentTarget.style.color = C.gold; }}
+              onMouseOut={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.gray; }}>
+              {s.icon} {s.name} ↗
+            </a>
+          ))}
+        </div>
+
+        {tab === "statewide" && <StatewideTab saved={saved} onSave={toggleSave} />}
+        {tab === "county" && <CountyTab saved={saved} onSave={toggleSave} />}
+        {tab === "route" && <RouteTab />}
+        {tab === "saved" && (
+          <div>
+            <div style={{ fontSize: "11px", letterSpacing: "3px", color: C.grayDark, marginBottom: "12px", fontWeight: "700" }}>SAVED ALERTS — {saved.length} ITEM{saved.length !== 1 ? "S" : ""}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              {saved.map((u, i) => <Card key={i} u={u} onSave={toggleSave} isSaved={true} />)}
+            </div>
+          </div>
+        )}
+
+        {showShareBox && (
+          <div style={{ marginTop: "28px", background: C.surface, border: `1px solid ${C.gold}`, borderRadius: "3px", padding: "14px 16px" }}>
+            <div style={{ fontSize: "11px", letterSpacing: "2px", color: C.goldBright, fontWeight: "700", marginBottom: "8px" }}>📤 SHARE THIS APP WITH YOUR TEAM</div>
+            <div style={{ fontSize: "12px", color: "#FFD580", marginBottom: "10px", fontWeight: "700" }}>
+              👆 Click the link below to select it, then press Ctrl+C (Windows) or ⌘+C (Mac) to copy.
+            </div>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <input
+                readOnly
+                id="shareUrl"
+                value={window.location.href}
+                onClick={e => e.target.select()}
+                onFocus={e => e.target.select()}
+                style={{ flex: 1, background: "#0A0A0A", border: `2px solid ${C.gold}`, color: C.goldBright, padding: "10px 14px", borderRadius: "3px", fontSize: "13px", fontFamily: "monospace", outline: "none", cursor: "text", letterSpacing: "0.5px" }}
+              />
+              <button onClick={() => {
+                const el = document.getElementById("shareUrl");
+                el.select();
+                try { navigator.clipboard.writeText(el.value).then(() => { el.style.borderColor = "#2E7D32"; setTimeout(() => el.style.borderColor = C.gold, 1500); }); } catch(e) { document.execCommand("copy"); }
+              }} style={{ background: C.gold, color: "#0A0A0A", border: "none", padding: "10px 18px", borderRadius: "3px", fontSize: "12px", fontWeight: "700", letterSpacing: "1px", cursor: "pointer", fontFamily: "inherit", textTransform: "uppercase", whiteSpace: "nowrap" }}>
+                📋 COPY
+              </button>
+            </div>
+            <div style={{ fontSize: "11px", color: C.grayDark, marginTop: "8px" }}>
+              Send this link to drivers, dispatchers, or anyone on your team — no login required.
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: "16px", paddingTop: "12px", borderTop: `1px solid ${C.border}`, fontSize: "11px", color: C.grayDark, letterSpacing: "1px", lineHeight: "1.8" }}>
+          DATA FROM MDOT · MICHIGAN TRUCKING ASSOCIATION · PUBLIC WEB SOURCES · ALWAYS VERIFY BEFORE DISPATCH<br />
+          © NAJ TRUCKING, INC. · <a href="https://najtrucking.com" target="_blank" rel="noopener noreferrer" style={{ color: C.gold }}>NAJTRUCKING.COM</a>
+        </div>
+      </div>
+    </div>
+    </>}
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
